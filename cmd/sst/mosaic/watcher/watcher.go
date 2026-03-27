@@ -342,6 +342,17 @@ func Start(ctx context.Context, config WatchConfig) error {
 					continue
 				}
 			}
+			// Ignore SST's own temp files and root-level generated files that
+			// cause infinite redeploy loops when watch config is set
+			baseName := filepath.Base(event.Name)
+			if strings.HasPrefix(baseName, "_tmp_") ||
+				(len(config.Watch) > 0 && filepath.Dir(event.Name) == config.Root &&
+					(baseName == "package.json" || baseName == "sst-env.d.ts" ||
+						strings.HasSuffix(baseName, ".lock") ||
+						strings.HasSuffix(baseName, ".log"))) {
+				log.Info("ignoring generated file event", "path", event.Name, "op", event.Op)
+				continue
+			}
 			if !isWatchedPath(roots, event.Name) {
 				log.Info("ignoring unwatched file event", "path", event.Name, "op", event.Op)
 				continue
