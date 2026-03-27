@@ -91,17 +91,17 @@ func (ib *deployBuilder) Build(ctx context.Context, input *runtime.BuildInput) (
 		return nil, fmt.Errorf("project resolution: %w", err)
 	}
 
-	localPackages, err := discoverBuildablePackages(projectInfo)
-	if err != nil {
-		return nil, fmt.Errorf("package discovery: %w", err)
-	}
-
-	var packagesBuilt []string
-	for _, pkg := range localPackages {
-		if err := ib.buildPackage(ctx, input, pkg); err != nil {
-			return nil, fmt.Errorf("build %s: %w", pkg.Name, err)
+	if !input.IsContainer {
+		localPackages, err := discoverBuildablePackages(projectInfo)
+		if err != nil {
+			return nil, fmt.Errorf("package discovery: %w", err)
 		}
-		packagesBuilt = append(packagesBuilt, pkg.Name)
+
+		for _, pkg := range localPackages {
+			if err := ib.buildPackage(ctx, input, pkg); err != nil {
+				return nil, fmt.Errorf("build %s: %w", pkg.Name, err)
+			}
+		}
 	}
 
 	if err := ib.installDependenciesForBuild(ctx, input, projectInfo); err != nil {
@@ -163,12 +163,21 @@ func (ib *deployBuilder) createFinalBuildOutput(input *runtime.BuildInput, proje
 // ensureDockerfile ensures a Dockerfile exists in the output directory for container builds.
 func (ib *deployBuilder) ensureDockerfile(input *runtime.BuildInput, projectInfo *projectInfo) error {
 	outputDockerfile := filepath.Join(input.Out(), "Dockerfile")
+	workspaceRoot := ib.findWorkspaceRoot(projectInfo)
 
 	// Ensure pyproject.toml is in the build context for `pip install .`
 	outputPyproject := filepath.Join(input.Out(), "pyproject.toml")
 	if _, err := os.Stat(outputPyproject); err != nil && projectInfo.PyprojectPath != "" {
 		if _, err := os.Stat(projectInfo.PyprojectPath); err == nil {
 			_ = copyFile(projectInfo.PyprojectPath, outputPyproject)
+		}
+	}
+
+	outputLockfile := filepath.Join(input.Out(), "uv.lock")
+	if _, err := os.Stat(outputLockfile); err != nil && workspaceRoot != "" {
+		workspaceLockfile := filepath.Join(workspaceRoot, "uv.lock")
+		if _, err := os.Stat(workspaceLockfile); err == nil {
+			_ = copyFile(workspaceLockfile, outputLockfile)
 		}
 	}
 
@@ -181,18 +190,25 @@ func (ib *deployBuilder) ensureDockerfile(input *runtime.BuildInput, projectInfo
 		projectRoot = path.ResolveRootDir(input.CfgPath)
 	}
 
-	customDockerfile := filepath.Join(projectRoot, "Dockerfile")
-	if _, err := os.Stat(customDockerfile); err == nil {
-		return copyFile(customDockerfile, outputDockerfile)
+	candidateDirs := []string{}
+	seen := map[string]bool{}
+	for _, dir := range []string{workspaceRoot, projectRoot} {
+		if dir != "" && !seen[dir] {
+			candidateDirs = append(candidateDirs, dir)
+			seen[dir] = true
+		}
 	}
-
 	if projectInfo.PyprojectPath != "" {
 		handlerPkgDir := filepath.Dir(projectInfo.PyprojectPath)
-		if handlerPkgDir != projectRoot {
-			handlerDockerfile := filepath.Join(handlerPkgDir, "Dockerfile")
-			if _, err := os.Stat(handlerDockerfile); err == nil {
-				return copyFile(handlerDockerfile, outputDockerfile)
-			}
+		if handlerPkgDir != "" && !seen[handlerPkgDir] {
+			candidateDirs = append(candidateDirs, handlerPkgDir)
+		}
+	}
+
+	for _, dir := range candidateDirs {
+		customDockerfile := filepath.Join(dir, "Dockerfile")
+		if _, err := os.Stat(customDockerfile); err == nil {
+			return copyFile(customDockerfile, outputDockerfile)
 		}
 	}
 
@@ -536,8 +552,24 @@ func (ib *deployBuilder) installDependenciesForBuild(ctx context.Context, input 
 	}
 
 	requirementsFile := filepath.Join(input.Out(), "requirements.txt")
-	if err := ib.generateOrCopyRequirementsFile(ctx, projectInfo, requirementsFile); err != nil {
+	if err := ib.generateRequirementsFile(ctx, projectInfo, requirementsFile, requirementsOptions{
+		NoEmitProject: input.IsContainer,
+	}); err != nil {
 		return fmt.Errorf("failed to generate requirements file: %w", err)
+	}
+
+	if input.IsContainer {
+		thirdPartyRequirements := filepath.Join(input.Out(), "requirements-third-party.txt")
+		if err := ib.generateRequirementsFile(ctx, projectInfo, thirdPartyRequirements, requirementsOptions{
+			NoEmitWorkspace: true,
+			NoEmitProject:   true,
+		}); err != nil {
+			return fmt.Errorf("failed to generate third-party requirements file: %w", err)
+		}
+
+		if err := os.MkdirAll(filepath.Join(input.Out(), "deps"), 0755); err != nil {
+			return fmt.Errorf("failed to create deps directory: %w", err)
+		}
 	}
 
 	// Determine architecture for Lambda
@@ -554,9 +586,13 @@ func (ib *deployBuilder) installDependenciesForBuild(ctx context.Context, input 
 	return nil
 }
 
-// generateOrCopyRequirementsFile generates requirements.txt once per workspace,
-// then copies it to each function's output directory.
-func (ib *deployBuilder) generateOrCopyRequirementsFile(ctx context.Context, projectInfo *projectInfo, outputFile string) error {
+type requirementsOptions struct {
+	NoEmitWorkspace bool
+	NoEmitProject   bool
+}
+
+// generateRequirementsFile exports requirements for the current function.
+func (ib *deployBuilder) generateRequirementsFile(ctx context.Context, projectInfo *projectInfo, outputFile string, options requirementsOptions) error {
 	// Include dev dependencies for projects without a build system (source-only projects).
 	// If the project has no [build-system], runtime deps may be in the dev group.
 	noDev := true
@@ -585,15 +621,18 @@ func (ib *deployBuilder) generateOrCopyRequirementsFile(ctx context.Context, pro
 		}
 	}
 
+	noEmitProject := options.NoEmitProject || !useAllPackages
+
 	exportCmd := &uvExportCommand{
 		WorkspaceDir:    workspaceRoot,
 		PackageName:     packageName,
 		OutputFile:      outputFile,
-		NoEmitWorkspace: false,
+		NoEmitWorkspace: options.NoEmitWorkspace,
 		NoDev:           noDev,
 		AllPackages:     useAllPackages,
-		NoEmitProject:   !useAllPackages,
+		NoEmitProject:   noEmitProject,
 		NoEditable:      true,
+		Frozen:          workspaceHasLockfile(workspaceRoot),
 	}
 
 	// uv export is fast (~300ms, no network/installs) so we run it per function
@@ -603,6 +642,15 @@ func (ib *deployBuilder) generateOrCopyRequirementsFile(ctx context.Context, pro
 	}
 
 	return nil
+}
+
+func workspaceHasLockfile(workspaceDir string) bool {
+	if workspaceDir == "" {
+		return false
+	}
+
+	_, err := os.Stat(filepath.Join(workspaceDir, "uv.lock"))
+	return err == nil
 }
 
 // inputProperties represents the input properties structure
@@ -640,8 +688,8 @@ func (ib *deployBuilder) installDependenciesForLambda(ctx context.Context, input
 	return nil
 }
 
-// copyWorkspacePackagesForContainer copies workspace package directories into the artifact
-// so the Dockerfile's `uv pip install -r requirements.txt` can resolve relative paths.
+// copyWorkspacePackagesForContainer copies local path dependencies into deps/
+// so the Dockerfile can install them without invalidating the app source layer.
 func (ib *deployBuilder) copyWorkspacePackagesForContainer(input *runtime.BuildInput, projectInfo *projectInfo) error {
 	workspaceRoot := ib.findWorkspaceRoot(projectInfo)
 
@@ -671,6 +719,12 @@ func (ib *deployBuilder) copyWorkspacePackagesForContainer(input *runtime.BuildI
 			}
 		}
 
+		pkgPath = filepath.Clean(strings.TrimPrefix(pkgPath, "./"))
+		if pkgPath == "." || strings.HasPrefix(pkgPath, "..") || filepath.IsAbs(pkgPath) {
+			slog.Warn("skipping unsupported local dependency path", "path", pkgPath, "line", line)
+			continue
+		}
+
 		// Resolve full path relative to workspace root
 		fullPath := filepath.Join(workspaceRoot, pkgPath)
 		if _, err := os.Stat(fullPath); err != nil {
@@ -678,8 +732,9 @@ func (ib *deployBuilder) copyWorkspacePackagesForContainer(input *runtime.BuildI
 			continue
 		}
 
-		// Copy to artifact at the same relative path
-		destPath := filepath.Join(input.Out(), pkgPath)
+		// Copy to deps/ at the same relative path so local path installs can be
+		// cached separately from the function source files.
+		destPath := filepath.Join(input.Out(), "deps", pkgPath)
 		if _, err := os.Stat(destPath); err == nil {
 			// Already exists — just ensure pyproject.toml is present for uv pip install
 			srcPyproject := filepath.Join(fullPath, "pyproject.toml")
@@ -1481,6 +1536,7 @@ type uvExportCommand struct {
 	NoEditable      bool
 	NoEmitProject   bool
 	AllPackages     bool
+	Frozen          bool
 }
 
 // newUvCommandRunner creates a new UV command runner
@@ -1564,6 +1620,9 @@ func (ur *uvCommandRunner) ExecuteExportCommand(ctx context.Context, cmd *uvExpo
 	}
 	if cmd.NoDev {
 		args = append(args, "--no-dev")
+	}
+	if cmd.Frozen {
+		args = append(args, "--frozen")
 	}
 
 	result, err := ur.executeCommand(ctx, "uv", args, cmd.WorkspaceDir)

@@ -1,27 +1,48 @@
-# The python version to use is supplied as an arg from SST
+ARG UV_VERSION=0.11.2
 ARG PYTHON_VERSION=3.11
 
-# Use an official AWS Lambda base image for Python
-FROM public.ecr.aws/lambda/python:${PYTHON_VERSION}
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-# # Ensure git is installed so we can install git based dependencies (such as sst)
+FROM public.ecr.aws/lambda/python:${PYTHON_VERSION} AS builder
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_NO_INSTALLER_METADATA=1
+ENV UV_LINK_MODE=copy
+
+COPY --from=uv /uv /bin/uv
+
 RUN if command -v dnf > /dev/null 2>&1; then \
-      dnf update -y && dnf install -y git gcc && dnf clean all; \
+      dnf install -y git gcc python3-devel && dnf clean all; \
     elif command -v yum > /dev/null 2>&1; then \
-      yum install -y git gcc && yum clean all; \
+      yum install -y git gcc python3-devel && yum clean all; \
     fi
 
-# Install UV to manage your python runtime
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+WORKDIR /build
 
-# Copy everything first so workspace packages (referenced as ./pkg in requirements.txt)
-# are available during dependency installation
+COPY requirements-third-party.txt ./requirements-third-party.txt
+RUN if grep -Eq '^[^#[:space:]]' requirements-third-party.txt; then \
+      uv pip install -r requirements-third-party.txt --target "${LAMBDA_TASK_ROOT}" --system; \
+    fi
+
+COPY requirements.txt ./requirements.txt
+COPY deps/ ./
+RUN if grep -Eq '^[^#[:space:]]' requirements.txt; then \
+      uv pip install -r requirements.txt --target "${LAMBDA_TASK_ROOT}" --system; \
+    fi
+
+FROM public.ecr.aws/lambda/python:${PYTHON_VERSION}
+
+COPY --from=builder ${LAMBDA_TASK_ROOT} ${LAMBDA_TASK_ROOT}
 COPY . ${LAMBDA_TASK_ROOT}
 
-# Install the dependencies to the lambda runtime
-RUN uv pip install -r requirements.txt --target ${LAMBDA_TASK_ROOT} --system
+# Perform any custom image setup here.
 
-# Perform any steps that you want here:
-# Example: pre-bake in model weights from huggingface to image
+RUN rm -rf \
+      ${LAMBDA_TASK_ROOT}/deps \
+      ${LAMBDA_TASK_ROOT}/Dockerfile \
+      ${LAMBDA_TASK_ROOT}/requirements.txt \
+      ${LAMBDA_TASK_ROOT}/requirements-third-party.txt \
+      ${LAMBDA_TASK_ROOT}/pyproject.toml \
+      ${LAMBDA_TASK_ROOT}/uv.lock
 
 # No need to configure the handler or entrypoint - SST will do that

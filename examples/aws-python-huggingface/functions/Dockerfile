@@ -1,42 +1,51 @@
-# If any docker wizard is interested, a multi-stage build would be better for caching
-# and reducing the size of the final image
-
-# The python version to use is supplied as an arg from SST
+ARG UV_VERSION=0.11.2
 ARG PYTHON_VERSION=3.12
 
-# Use an official AWS Lambda base image for Python
-FROM public.ecr.aws/lambda/python:${PYTHON_VERSION} as builder
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-# # Ensure git is installed so we can install git based dependencies (such as sst)
-ARG PYTHON_RUNTIME
+FROM public.ecr.aws/lambda/python:${PYTHON_VERSION} AS builder
 
-# Install git and gcc using appropriate package manager based on Python version
-RUN dnf install -y git gcc gcc-c++ openssl-devel
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_NO_INSTALLER_METADATA=1
+ENV UV_LINK_MODE=copy
 
-# Install Rust using rustup
+COPY --from=uv /uv /bin/uv
+
+RUN if command -v dnf > /dev/null 2>&1; then \
+      dnf install -y git gcc gcc-c++ openssl-devel python3-devel curl && dnf clean all; \
+    elif command -v yum > /dev/null 2>&1; then \
+      yum install -y git gcc gcc-c++ openssl-devel python3-devel curl && yum clean all; \
+    fi
+
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
-
-# Add Cargo to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install UV to manage your python runtime
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+WORKDIR /build
 
-# Copy everything first so workspace package references (e.g., ./functions)
-# in requirements.txt resolve correctly during installation
-COPY . ${LAMBDA_TASK_ROOT}
+COPY requirements-third-party.txt ./requirements-third-party.txt
+RUN if grep -Eq '^[^#[:space:]]' requirements-third-party.txt; then \
+      uv pip install -r requirements-third-party.txt --target "${LAMBDA_TASK_ROOT}" --system --no-verify-hashes; \
+    fi
 
-# Install the dependencies to the lambda runtime
-RUN uv pip install -r requirements.txt --target ${LAMBDA_TASK_ROOT} --system --no-verify-hashes
+COPY requirements.txt ./requirements.txt
+COPY deps/ ./
+RUN if grep -Eq '^[^#[:space:]]' requirements.txt; then \
+      uv pip install -r requirements.txt --target "${LAMBDA_TASK_ROOT}" --system --no-verify-hashes; \
+    fi
 
 FROM public.ecr.aws/lambda/python:${PYTHON_VERSION}
 
 ENV HF_HOME=/tmp/transformers_cache
 
-# Copy installed dependencies and application code from the builder stage
 COPY --from=builder ${LAMBDA_TASK_ROOT} ${LAMBDA_TASK_ROOT}
-
-# Copy the rest of the code
 COPY . ${LAMBDA_TASK_ROOT}
+
+RUN rm -rf \
+      ${LAMBDA_TASK_ROOT}/deps \
+      ${LAMBDA_TASK_ROOT}/Dockerfile \
+      ${LAMBDA_TASK_ROOT}/requirements.txt \
+      ${LAMBDA_TASK_ROOT}/requirements-third-party.txt \
+      ${LAMBDA_TASK_ROOT}/pyproject.toml \
+      ${LAMBDA_TASK_ROOT}/uv.lock
 
 # No need to configure the handler or entrypoint - SST will do that

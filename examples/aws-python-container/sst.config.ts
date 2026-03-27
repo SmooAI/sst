@@ -48,15 +48,20 @@
  * ```
  *
  * Here we have a `Dockerfile` in the `custom_dockerfile/` directory.
+ * SST builds from a generated artifact directory. Your function source is at the
+ * root of that context, and local path dependencies from `requirements.txt` are
+ * copied into `deps/`.
  *
  * ```dockerfile title="custom_dockerfile/Dockerfile"
- * # The python version to use is supplied as an arg from SST
+ * ARG UV_VERSION=0.11.2
  * ARG PYTHON_VERSION=3.11
  * 
- * # Use an official AWS Lambda base image for Python
- * FROM public.ecr.aws/lambda/python:${PYTHON_VERSION}
+ * FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+ * FROM public.ecr.aws/lambda/python:${PYTHON_VERSION} AS builder
  *
- * # ...
+ * # ... install third-party deps from `requirements-third-party.txt`
+ * # ... install local deps from `deps/` + `requirements.txt`
+ * # ... copy the function source in the final stage
  * ```
  *
  * The project structure looks something like this.

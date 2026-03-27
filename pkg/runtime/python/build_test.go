@@ -156,6 +156,135 @@ boto3>=1.34.0`
 	})
 }
 
+func TestCopyWorkspacePackagesForContainer_UsesDepsDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgPath := filepath.Join(tempDir, "sst.config.ts")
+	if err := os.WriteFile(cfgPath, []byte("export default {}"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	rootPyproject := filepath.Join(tempDir, "pyproject.toml")
+	if err := os.WriteFile(rootPyproject, []byte(`[project]
+name = "app"
+version = "0.1.0"
+`), 0644); err != nil {
+		t.Fatalf("Failed to write root pyproject.toml: %v", err)
+	}
+
+	coreDir := filepath.Join(tempDir, "core")
+	if err := os.MkdirAll(coreDir, 0755); err != nil {
+		t.Fatalf("Failed to create core dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreDir, "pyproject.toml"), []byte(`[project]
+name = "core"
+version = "0.1.0"
+`), 0644); err != nil {
+		t.Fatalf("Failed to write core pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreDir, "core.py"), []byte("VALUE = 1\n"), 0644); err != nil {
+		t.Fatalf("Failed to write core module: %v", err)
+	}
+
+	input := &runtime.BuildInput{
+		CfgPath:    cfgPath,
+		FunctionID: "container-deps",
+		Handler:    "handler.main",
+	}
+	if err := os.MkdirAll(input.Out(), 0755); err != nil {
+		t.Fatalf("Failed to create output dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(input.Out(), "requirements.txt"), []byte("./core\nrequests==2.31.0\n"), 0644); err != nil {
+		t.Fatalf("Failed to write requirements.txt: %v", err)
+	}
+
+	ib := &deployBuilder{}
+	projectInfo := &projectInfo{
+		ProjectRoot:   tempDir,
+		SourceRoot:    tempDir,
+		PyprojectPath: rootPyproject,
+	}
+	if err := ib.copyWorkspacePackagesForContainer(input, projectInfo); err != nil {
+		t.Fatalf("copyWorkspacePackagesForContainer failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(input.Out(), "deps", "core", "pyproject.toml")); err != nil {
+		t.Fatalf("Expected dependency under deps/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(input.Out(), "core")); !os.IsNotExist(err) {
+		t.Fatalf("Did not expect dependency at artifact root")
+	}
+}
+
+func TestEnsureDockerfilePrefersWorkspaceRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	appsMainDir := filepath.Join(tempDir, "apps", "main")
+	packageDir := filepath.Join(appsMainDir, "packages", "api")
+	handlerDir := filepath.Join(packageDir, "auth")
+
+	if err := os.MkdirAll(handlerDir, 0755); err != nil {
+		t.Fatalf("Failed to create handler dir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tempDir, "pyproject.toml"), []byte(`[project]
+name = "workspace"
+version = "0.1.0"
+
+[tool.uv.workspace]
+members = ["apps/main/packages/api"]
+`), 0644); err != nil {
+		t.Fatalf("Failed to write workspace pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "pyproject.toml"), []byte(`[project]
+name = "api"
+version = "0.1.0"
+`), 0644); err != nil {
+		t.Fatalf("Failed to write package pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(handlerDir, "login.py"), []byte("def handler(event, context):\n    return {}\n"), 0644); err != nil {
+		t.Fatalf("Failed to write handler: %v", err)
+	}
+
+	workspaceDocker := []byte("FROM workspace-root\n")
+	if err := os.WriteFile(filepath.Join(tempDir, "Dockerfile"), workspaceDocker, 0644); err != nil {
+		t.Fatalf("Failed to write workspace Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appsMainDir, "Dockerfile"), []byte("FROM project-root\n"), 0644); err != nil {
+		t.Fatalf("Failed to write project Dockerfile: %v", err)
+	}
+
+	cfgPath := filepath.Join(appsMainDir, "sst.config.ts")
+	if err := os.WriteFile(cfgPath, []byte("export default {}"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	input := &runtime.BuildInput{
+		CfgPath:    cfgPath,
+		FunctionID: "dockerfile-lookup",
+		Handler:    "packages/api/auth/login.handler",
+	}
+	if err := os.MkdirAll(input.Out(), 0755); err != nil {
+		t.Fatalf("Failed to create output dir: %v", err)
+	}
+
+	projectInfo, err := resolveHandler(appsMainDir, input.Handler)
+	if err != nil {
+		t.Fatalf("Failed to resolve handler: %v", err)
+	}
+
+	ib := &deployBuilder{}
+	if err := ib.ensureDockerfile(input, projectInfo); err != nil {
+		t.Fatalf("ensureDockerfile failed: %v", err)
+	}
+
+	contents, err := os.ReadFile(filepath.Join(input.Out(), "Dockerfile"))
+	if err != nil {
+		t.Fatalf("Failed to read output Dockerfile: %v", err)
+	}
+	if string(contents) != string(workspaceDocker) {
+		t.Fatalf("Expected workspace Dockerfile, got %q", string(contents))
+	}
+}
+
 // --- Content filter tests (merged from content_filter_test.go) ---
 
 // newContentFilterWithPatterns creates a contentFilter with the given exclude patterns for testing

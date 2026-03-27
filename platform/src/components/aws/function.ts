@@ -1168,8 +1168,11 @@ export interface FunctionArgs {
      * This needs the Docker daemon to be running.
      * :::
      *
-     * To use a custom Dockerfile, add one to the rooot of the uv workspace
+     * To use a custom Dockerfile, add one to the root of the uv workspace
      * of the function.
+     * SST builds from a generated artifact directory. Your function source is at the
+     * root of that context, and local path dependencies referenced by
+     * `requirements.txt` are copied into `deps/`.
      *
      *
      * ```txt {5}
@@ -2329,12 +2332,13 @@ export class Function extends Component implements Link.Linkable {
       // The build artifact directory already exists, with all the user code and
       // config files. It also has the dockerfile, we need to now just build and push to
       // the container registry.
-      return all([isContainer, dev, bundle, containerCache]).apply(
+      return all([isContainer, dev, bundle, containerCache, runtime]).apply(
         ([
           isContainer,
           dev,
           bundle, // We need the bundle to be resolved because of implicit dockerfiles even though we don't use it here
           containerCache,
+          runtime,
         ]) => {
           if (!isContainer || dev) return;
 
@@ -2353,6 +2357,13 @@ export class Function extends Component implements Link.Linkable {
                   `${name}-src`,
                 ),
               },
+              ...(typeof runtime === "string" && runtime.startsWith("python")
+                ? {
+                    buildArgs: {
+                      PYTHON_VERSION: runtime.replace(/^python/, ""),
+                    },
+                  }
+                : {}),
               ...(containerCache !== false
                 ? {
                     cacheFrom: [
