@@ -74,24 +74,32 @@ jobs:
           mkdir -p ./dist/dockerfiles/
           cp ./functions/docker/python.Dockerfile ./dist/dockerfiles/python.Dockerfile
 
+      # Extract version from the tag this branch is based on
+      - name: Get SST version
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "4.5.11")
+          VERSION="${VERSION#v}"  # Strip leading v
+          echo "SST_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building SST version: $VERSION"
+
       # Build SST binaries for all target platforms
       - name: Build SST binary - darwin-arm64
         env:
           GOOS: darwin
           GOARCH: arm64
-        run: go build -o bin/sst-darwin-arm64 ./cmd/sst
+        run: go build -ldflags="-X main.version=${{ env.SST_VERSION }}" -o bin/sst-darwin-arm64 ./cmd/sst
 
       - name: Build SST binary - darwin-x64
         env:
           GOOS: darwin
           GOARCH: amd64
-        run: go build -o bin/sst-darwin-x64 ./cmd/sst
+        run: go build -ldflags="-X main.version=${{ env.SST_VERSION }}" -o bin/sst-darwin-x64 ./cmd/sst
 
       - name: Build SST binary - linux-x64
         env:
           GOOS: linux
           GOARCH: amd64
-        run: go build -o bin/sst-linux-x64 ./cmd/sst
+        run: go build -ldflags="-X main.version=${{ env.SST_VERSION }}" -o bin/sst-linux-x64 ./cmd/sst
 
       # Create/update the smooai-latest release with all binaries
       - name: Delete existing smooai-latest release
