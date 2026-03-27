@@ -74,14 +74,15 @@ jobs:
           mkdir -p ./dist/dockerfiles/
           cp ./functions/docker/python.Dockerfile ./dist/dockerfiles/python.Dockerfile
 
-      # Extract version from the nearest v* semver tag
+      # Get SST version from the branch name (smooai/vX.Y.Z-patched)
       - name: Get SST version
         run: |
-          VERSION=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1 || echo "v4.5.11")
-          VERSION="${VERSION#v}"  # Strip leading v
+          BRANCH="${GITHUB_REF_NAME}"
+          # Extract version from branch name like smooai/v4.5.11-patched
+          VERSION=$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "4.5.11")
           echo "SST_VERSION=$VERSION" >> $GITHUB_ENV
           echo "RELEASE_TAG=smooai-v$VERSION" >> $GITHUB_ENV
-          echo "Building SST version: $VERSION (release tag: smooai-v$VERSION)"
+          echo "Building SST version: $VERSION from branch: $BRANCH"
 
       # Build SST binaries for all target platforms
       - name: Build SST binary - darwin-arm64
