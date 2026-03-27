@@ -1,0 +1,115 @@
+name: Build SST Binaries
+
+on:
+  push:
+    branches:
+      - smooai/watcher-ignore-generated-files
+      - smooai/v4.5.11-patched
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.24.0"
+          cache: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Install platform dependencies
+        run: cd platform && bun install
+
+      # Run the platform build steps individually (skip Docker parts from scripts/build)
+      - name: Build platform - bun functions
+        working-directory: platform
+        run: |
+          bun build ./functions/cf-static-site-router-worker/index.ts --target=node --outdir ./dist/cf-static-site-router-worker/
+          bun build ./functions/cf-ssr-site-router-worker/index.ts --target=node --outdir ./dist/cf-ssr-site-router-worker/
+          bun build ./functions/nodejs-runtime/index.ts --target=node --outdir ./dist/nodejs-runtime/
+          bun build ./functions/nodejs-runtime/loop.ts --target=node --outdir ./dist/nodejs-runtime/
+
+      - name: Build platform - Go bridge (linux/amd64)
+        working-directory: platform
+        run: GOARCH=amd64 GOOS=linux go build -trimpath -buildvcs=false -mod=readonly -ldflags="-buildid=" -o ./dist/bridge/bootstrap ./functions/bridge
+
+      - name: Build platform - esbuild functions
+        working-directory: platform
+        run: node ./scripts/build.mjs
+
+      - name: Build platform - copy assets
+        working-directory: platform
+        run: |
+          mkdir -p ./dist/nodejs-bridge
+          cp ./functions/nodejs-bridge/index.mjs ./dist/nodejs-bridge/index.mjs
+          cp ./dist/bridge/bootstrap ./dist/nodejs-bridge/bootstrap
+
+          mkdir -p ./dist/python-runtime/
+          cp ./functions/python-runtime/index.py ./dist/python-runtime/index.py
+
+          mkdir -p ./dist/dockerfiles/
+          cp ./functions/docker/python.Dockerfile ./dist/dockerfiles/python.Dockerfile
+
+      # Build SST binaries for all target platforms
+      - name: Build SST binary - darwin-arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -o bin/sst-darwin-arm64 ./cmd/sst
+
+      - name: Build SST binary - darwin-x64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+        run: go build -o bin/sst-darwin-x64 ./cmd/sst
+
+      - name: Build SST binary - linux-x64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -o bin/sst-linux-x64 ./cmd/sst
+
+      # Create/update the smooai-latest release with all binaries
+      - name: Delete existing smooai-latest release
+        run: gh release delete smooai-latest --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create smooai-latest release
+        run: |
+          gh release create smooai-latest \
+            --title "SmooAI Custom Build" \
+            --notes "Custom SST build from \`smooai/watcher-ignore-generated-files\` branch.
+
+          Commit: ${{ github.sha }}
+          Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+            --prerelease \
+            bin/sst-darwin-arm64 \
+            bin/sst-darwin-x64 \
+            bin/sst-linux-x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
