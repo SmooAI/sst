@@ -74,13 +74,14 @@ jobs:
           mkdir -p ./dist/dockerfiles/
           cp ./functions/docker/python.Dockerfile ./dist/dockerfiles/python.Dockerfile
 
-      # Extract version from the tag this branch is based on
+      # Extract version from the nearest v* semver tag
       - name: Get SST version
         run: |
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "4.5.11")
+          VERSION=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1 || echo "v4.5.11")
           VERSION="${VERSION#v}"  # Strip leading v
           echo "SST_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Building SST version: $VERSION"
+          echo "RELEASE_TAG=smooai-v$VERSION" >> $GITHUB_ENV
+          echo "Building SST version: $VERSION (release tag: smooai-v$VERSION)"
 
       # Build SST binaries for all target platforms
       - name: Build SST binary - darwin-arm64
@@ -102,16 +103,16 @@ jobs:
         run: go build -ldflags="-X main.version=${{ env.SST_VERSION }}" -o bin/sst-linux-x64 ./cmd/sst
 
       # Create/update the smooai-latest release with all binaries
-      - name: Delete existing smooai-latest release
-        run: gh release delete smooai-latest --yes --cleanup-tag 2>/dev/null || true
+      - name: Delete existing release for this version
+        run: gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create smooai-latest release
+      - name: Create versioned release
         run: |
-          gh release create smooai-latest \
-            --title "SmooAI Custom Build" \
-            --notes "Custom SST build from \`smooai/watcher-ignore-generated-files\` branch.
+          gh release create "$RELEASE_TAG" \
+            --title "SmooAI SST $SST_VERSION" \
+            --notes "Custom SST $SST_VERSION build with watcher fix.
 
           Commit: ${{ github.sha }}
           Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
