@@ -346,6 +346,7 @@ func Start(ctx context.Context, config WatchConfig) error {
 			// cause infinite redeploy loops when watch config is set
 			baseName := filepath.Base(event.Name)
 			if strings.HasPrefix(baseName, "_tmp_") ||
+				baseName == "payload-types.ts" ||
 				(len(config.Watch) > 0 && filepath.Dir(event.Name) == config.Root &&
 					(baseName == "package.json" || baseName == "sst-env.d.ts" ||
 						strings.HasSuffix(baseName, ".lock") ||
