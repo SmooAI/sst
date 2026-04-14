@@ -16,7 +16,6 @@ import { RETENTION } from "./logging";
 import { dns as awsDns } from "./dns";
 import { ApiGatewayV2DomainArgs } from "./helpers/apigatewayv2-domain";
 import { ApiGatewayV2LambdaRoute } from "./apigatewayv2-lambda-route";
-import { ApiGatewayV2LambdaSharedRoute } from "./apigatewayv2-lambda-shared-route";
 import { ApiGatewayV2Authorizer } from "./apigatewayv2-authorizer";
 import { apigatewayv2, cloudwatch, types } from "@pulumi/aws";
 import { ApiGatewayV2UrlRoute } from "./apigatewayv2-url-route";
@@ -1205,21 +1204,6 @@ export class ApiGatewayV2 extends Component implements Link.Linkable {
         ? this.integrationCache.get(fingerprint)
         : undefined;
 
-    if (cached) {
-      return new ApiGatewayV2LambdaSharedRoute(
-        routeId,
-        {
-          api: baseApi,
-          route,
-          integration: cached.nodes.integration,
-          lambdaFunction: cached.nodes.function,
-          permission: cached.nodes.permission,
-          ...routeArgs,
-        },
-        routeOpts,
-      );
-    }
-
     const created = new ApiGatewayV2LambdaRoute(
       routeId,
       {
@@ -1228,6 +1212,15 @@ export class ApiGatewayV2 extends Component implements Link.Linkable {
         handler,
         handlerLink: this.constructorArgs.link,
         handlerTransform: this.constructorArgs.transform?.route?.handler,
+        ...(cached
+          ? {
+              sharedIntegration: {
+                integration: cached.nodes.integration,
+                lambdaFunction: cached.nodes.function,
+                permission: cached.nodes.permission,
+              },
+            }
+          : {}),
         ...routeArgs,
       },
       routeOpts,
