@@ -5,6 +5,7 @@ on:
     branches:
       - smooai/watcher-ignore-generated-files
       - smooai/v4.5.11-patched
+      - smooai/v4.13.0-patched
 
 permissions:
   contents: write
@@ -82,7 +83,7 @@ jobs:
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           # Extract version from branch name like smooai/v4.5.11-patched
-          VERSION=$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "4.5.11")
+          VERSION=$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "4.13.0")
           echo "SST_VERSION=$VERSION" >> $GITHUB_ENV
           echo "RELEASE_TAG=smooai-v$VERSION" >> $GITHUB_ENV
           echo "Building SST version: $VERSION from branch: $BRANCH"
